@@ -51,19 +51,24 @@ static int enable_raw_mode(void) {
 
 // METHODS AND STRUCTURES FOR FILE HANDLING AND DISPLAYING;
 
-// Create structures for the line and the file.
+// Create structures for the line, the screen and the file.
+typedef struct {
+    size_t dimension_y;
+    size_t dimension_x;
+} Screen;
 typedef struct {
     size_t capacity;
     size_t length;
 } Line;
-
 typedef struct {
     size_t capacity;
     size_t num_lines;
 } File;
 
+Screen* screen = NULL;
 size_t cursor_x = 1;
 size_t cursor_y = 1;
+signed int changes = 0;
 
 // Method to get a line from a file stream
 static int portable_getline(char **lineptr, size_t *n, FILE *stream) {
@@ -265,17 +270,40 @@ void re_render_line(size_t index, File* file_buffer){
     printf(line_to_string(line));
     printf("\n");
 }
-//displays the line number
 
+//prints the file
 void display_file(File* file_buffer){
     // clear screen
     printf("\x1b[2J\x1b[H");
-    for(int i = 0; i < file_buffer->num_lines; i++){
-        Line* line = get_line_from_buffer(file_buffer,i);
-            printf("\x1b[90m%zu ~ \x1b[0m",i + 1);
+    for(int i = 0; i < screen->dimension_y; i++){
+        if(i < file_buffer->num_lines){
+            Line* line = get_line_from_buffer(file_buffer,i);
+            printf("\x1b[K\x1b[90m%zu ~ \x1b[0m",i + 1);
             printf("%s",line_to_string(line));
             printf("\n");
+        } else {
+            printf("\x1b[K\x1b[90m # \n\x1b[0m");
+        }
     }
+}
+
+//saves the file and displays the saved message
+void save_file(FILE* file_out, File* file_in){
+    if(file_in == NULL || file_out == NULL){
+        perror("save file needs two valid pointers");
+        exit(EXIT_FAILURE);
+    }
+
+    for (size_t i = 0; i < file_in->num_lines; i++) {
+        fputs(line_to_string(get_line_from_buffer(file_in, i)), file_out);
+        fputc('\n', file_out);
+    }
+    fflush(file_out);
+    fclose(file_out);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
+    printf("\x1b[32mFile saved!\x1b[0m");
+    printf("\x1b[%zu;%zuH",cursor_y,cursor_x + padding_x - 1);
+    changes = 0;
 }
 
 //reads a char from the input
@@ -286,6 +314,9 @@ static int read_key(void) {
     return ch;
 }
 int main(int argc, char *argv[]) {
+    screen = malloc(sizeof(Screen));
+    screen->dimension_x = 80;
+    screen->dimension_y = 20;
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return EXIT_FAILURE;
@@ -308,11 +339,22 @@ int main(int argc, char *argv[]) {
     printf("\x1b[?1049h");
     // display the inital file and move the cursor to the start
     display_file(file_buffer);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
+    printf("Lenght change: %zu", changes);
     printf("\x1b[1;%zuH",padding_x);
     //enter a loop
     char c;
     while(c = read_key()){
         if(c == 17) break;
+        if(c == 19) {
+            FILE *file = fopen(argv[1], "w+");
+            if (file == NULL) {
+                perror("Error opening file");
+                return EXIT_FAILURE;
+            }
+            save_file(file,file_buffer);
+            continue;
+        }
         if (c == 27) {
             if (getchar() != '[') continue;
             int k = getchar();
@@ -320,12 +362,15 @@ int main(int argc, char *argv[]) {
             else if (k == 'A' && cursor_y > 1) cursor_y--;
             else if (k == 'C' && cursor_x) cursor_x++;
             else if (k == 'B' && cursor_y < file_buffer->num_lines) cursor_y++;
+            changes--;
         }else if((c == 127 || c == 8)){
             if(cursor_x > 1){
                 delete_char(file_buffer,cursor_y - 1, cursor_x - 2);
                 re_render_line(cursor_y - 1,file_buffer);
                 cursor_x--;
+                changes--;
             }
+            changes--;
         } else if(c == 13 || c == 10) {
             cursor_y++;
             cursor_x = 1;
@@ -336,6 +381,9 @@ int main(int argc, char *argv[]) {
             re_render_line(cursor_y - 1,file_buffer);
             cursor_x = col + 2;
         }
+        changes++;
+        printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
+        printf("Lenght change: %d", changes);
         printf("\x1b[%zu;%zuH",cursor_y,cursor_x + padding_x - 1);
     }
     //leave alternate screen
