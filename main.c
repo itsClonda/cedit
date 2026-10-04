@@ -14,7 +14,6 @@
 
 static HANDLE hIn, hOut;
 static DWORD origInMode, origOutMode;
-static size_t padding_x = 5;
 
 static void disable_raw_mode(void) {
     printf("\x1b[?25h\x1b[?1049l");   // show cursor, leave alt screen
@@ -55,6 +54,7 @@ static int enable_raw_mode(void) {
 typedef struct {
     size_t dimension_y;
     size_t dimension_x;
+    size_t y_index;
 } Screen;
 typedef struct {
     size_t capacity;
@@ -68,6 +68,7 @@ typedef struct {
 Screen* screen = NULL;
 size_t cursor_x = 1;
 size_t cursor_y = 1;
+static size_t padding_x = 3;
 signed int changes = 0;
 
 // Method to get a line from a file stream
@@ -167,7 +168,10 @@ File *format_file_to_buffer(FILE *file) {
         Line *new_line = init_line(line);
         buffer = push_line(buffer, new_line);
     }
-
+    if(buffer->num_lines == 0){
+        Line *new_line = init_line("");
+        buffer = push_line(buffer, new_line);
+    }
     free(line);
     return buffer;
 }
@@ -196,6 +200,32 @@ size_t insert_char(File *buf, size_t row, size_t col, char c) {
     line->length++;
     return col;
 }
+
+//merges two lines of the file buffer
+void merge_lines(File* file_buffer, size_t row) {
+    if(row == 0){
+        return;
+    }
+    Line** lines = (Line**) (file_buffer + 1);
+    Line* line_1 = lines[row - 1];
+    size_t cursor_x_position = line_1->length;
+    Line* line_2 = lines[row]; 
+    line_1->capacity = strlen((char*) (line_1 + 1)) + strlen((char*) (line_2 + 1)) + 1;
+    line_1->length = line_1->capacity - 1;
+    Line* tmp = realloc(line_1, sizeof(Line) + line_1->capacity);
+    if(tmp == NULL){
+        perror("unable to merge lines");
+        exit(EXIT_FAILURE);
+    }
+    lines[row - 1] = tmp;
+    strcat((char*) (tmp + 1),(char*) (line_2 + 1));
+    memmove(lines + row, lines + row + 1,(file_buffer->num_lines - row - 1)*sizeof(Line*));
+    free(line_2);
+    file_buffer->num_lines--;
+    cursor_y--;
+    cursor_x = cursor_x_position + 1;
+};
+
 // deletes 1 char
 void delete_char(File *buf, size_t row, size_t col) {
     if(row < 0 || col < 0){
@@ -208,6 +238,7 @@ void delete_char(File *buf, size_t row, size_t col) {
     memmove(s + col, s + col + 1, line->length - col);
     line->length--;
 }
+
 //gets a specific line from a File buffer
 Line *get_line_from_buffer(File* file_buffer,size_t index){
     if(file_buffer->num_lines < index + 1){
@@ -226,7 +257,7 @@ Line *get_line_from_buffer(File* file_buffer,size_t index){
     return lines[index];
 }
 //adds a new line
-File *add_new_line(File *file_buffer, size_t index) {
+File *add_new_line(File *file_buffer, size_t index, size_t col) {
     if (file_buffer == NULL) {
         fprintf(stderr, "file buffer can't be NULL\n");
         exit(EXIT_FAILURE);
@@ -248,9 +279,20 @@ File *add_new_line(File *file_buffer, size_t index) {
     }
 
     Line **lines = (Line **)(file_buffer + 1);
+    Line* line_to_modify = lines[index];
+    if(col > line_to_modify->length){
+        col = line_to_modify->length;
+    }
+    char* text = (char*) (line_to_modify + 1);
+    char* next_line_text = malloc(line_to_modify->length - col + 1);
+    line_to_modify->length = col;
+    strcpy(next_line_text, text + col);
+    text[col] = '\0';
     memmove(lines + index + 1, lines + index, (file_buffer->num_lines - index) * sizeof(Line*));
-    lines[index] = init_line(" ");
-    file_buffer->num_lines++;                      
+    lines[index] = line_to_modify;
+    lines[index + 1] = init_line(next_line_text);
+    file_buffer->num_lines++;    
+    free(next_line_text);                  
     return file_buffer;
 }
 
@@ -266,20 +308,20 @@ char *line_to_string(Line *line) {
 //rerenders 1 line 
 void re_render_line(size_t index, File* file_buffer){
     Line* line = get_line_from_buffer(file_buffer,index);
-    printf("\x1b[%zu;%zuH\x1b[K",index + 1,padding_x);
-    printf(line_to_string(line));
+    printf("\x1b[%zu;%zuH\x1b[K",index + 1 - screen->y_index, padding_x + 1);
+    fputs(line_to_string(line), stdout);
     printf("\n");
 }
 
 //prints the file
 void display_file(File* file_buffer){
     // clear screen
-    printf("\x1b[2J\x1b[H");
-    for(int i = 0; i < screen->dimension_y; i++){
+    printf("\x1b[H");
+    for(int i = screen->y_index; i < (screen->dimension_y + screen->y_index); i++){
         if(i < file_buffer->num_lines){
             Line* line = get_line_from_buffer(file_buffer,i);
-            printf("\x1b[K\x1b[90m%zu ~ \x1b[0m",i + 1);
-            printf("%s",line_to_string(line));
+            printf("\x1b[K\x1b[90m ~ \x1b[0m");
+            fputs(line_to_string(line), stdout);
             printf("\n");
         } else {
             printf("\x1b[K\x1b[90m # \n\x1b[0m");
@@ -287,36 +329,230 @@ void display_file(File* file_buffer){
     }
 }
 
-//saves the file and displays the saved message
-void save_file(FILE* file_out, File* file_in){
-    if(file_in == NULL || file_out == NULL){
-        perror("save file needs two valid pointers");
-        exit(EXIT_FAILURE);
-    }
+// FUNCTIONS FOR COMMAND PALETTE
 
-    for (size_t i = 0; i < file_in->num_lines; i++) {
-        fputs(line_to_string(get_line_from_buffer(file_in, i)), file_out);
-        fputc('\n', file_out);
-    }
-    fflush(file_out);
-    fclose(file_out);
-    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
-    printf("\x1b[32mFile saved!\x1b[0m");
-    printf("\x1b[%zu;%zuH",cursor_y,cursor_x + padding_x - 1);
-    changes = 0;
-}
-
-//reads a char from the input
+//reads a char from the input (used also in the main loop)
 static int read_key(void) {
     unsigned char ch;
     DWORD got = 0;
     if (!ReadFile(hIn, &ch, 1, &got, NULL) || got == 0) return EOF;
     return ch;
 }
+
+Line* command;
+int is_command_insered = 0;
+int is_command_mode = 0;
+size_t command_mode_cursor_x = 1;
+size_t command_mode_cursor_y = 1;
+//displays command palette
+void display_command_palette() {
+    if(command->length > 0){
+        is_command_insered = 1;
+    } else {
+        is_command_insered = 0;
+    }
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+4, 1);
+    if (is_command_insered) {
+        printf("\x1b[33m%s\x1b[0m", line_to_string(command));
+    } else {
+        if(is_command_mode){
+            printf("\x1b[33mEnter command... \x1b[0m");
+        } else {
+            printf("\x1b[33mEnter command mode with Ctrl+P \x1b[0m");
+        }
+    }
+    fflush(stdout);
+}
+//initializes command palette
+void init_command_palette() {
+    command = init_line("");
+    command_mode_cursor_y = screen->dimension_y + 4;
+    if (command == NULL) {
+        perror("Error allocating memory for command palette");
+        exit(EXIT_FAILURE);
+    }
+    display_command_palette();
+}
+//frees command palette
+void free_command_palette() {
+    free(command);
+}
+
+//inserts a char into the command palette
+size_t insert_char_command_palette(size_t col, char c) {
+    if (col > command->length) col = command->length;
+ 
+    if (command->length + 2 >= command->capacity) {
+        size_t new_cap = command->capacity * 2;
+        Line *tmp = (Line *)realloc(command, sizeof(Line) + new_cap);
+        if (tmp == NULL) {
+            perror("Error reallocating memory for line");
+            exit(EXIT_FAILURE);
+        }
+        command = tmp;
+        command->capacity = new_cap;
+    }
+ 
+    char *s = (char *)(command + 1);
+    memmove(s + col + 1, s + col, command->length - col + 1);
+    s[col] = c;
+    command->length++;
+    return col;
+}
+
+//deletes a char from the command palette
+void delete_char_command_palette(size_t col) {
+    if(col < 0){
+        return;
+    }
+    if (col >= command->length) return;
+
+    char *s = (char *)(command + 1);
+    memmove(s + col, s + col + 1, command->length - col);
+    command->length--;
+}
+
+//prints the output/name of a command
+void print_command_name(char* output){
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+6, 1);
+    printf("\x1b[90m-> %s\x1b[0m", output);
+}
+void print_command_output(char* output){
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+9, 1);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+8, 1);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+7, 1);
+    printf("%s",output);
+}
+
+//evaluates a command and calls the right function to process it
+void evaluate_command(File* file_buffer){
+    char* text = (char*) (command + 1);
+    if(text[0] != '$') {
+        print_command_name("\x1b[31m A valid command starts with a $");
+    } else {
+        //prints command
+        print_command_name(text);
+        //evaluates the commands
+        if(strstr(text,"lns") != NULL){
+            char mess_string[128];
+            snprintf(mess_string,sizeof(mess_string),"The program has %zu lines.",file_buffer->num_lines);
+            print_command_output(mess_string);
+        } else if(strstr(text,"jmp")) {
+            print_command_output("Enter line to jump to: ");
+            int c;
+            int digit = 1;
+            int final_number = 0;
+            while(c = read_key()){
+                if(c == 13 || c == 10) break;
+                if(c >= '0' && c <= '9') {
+                    int number = c - '0';
+                    if(digit > 1) final_number *= 10;
+                    final_number += number;
+                    digit++;
+                    printf("%c",c);
+                }
+            }
+            if(final_number < 1){
+                print_command_output("Invalid line number");
+                return;
+            }
+            char mess_string[128];
+            snprintf(mess_string,sizeof(mess_string),(final_number <= file_buffer->num_lines) ? "Jumping to line: %zu" : "Line is out of this file",final_number);
+            print_command_output(mess_string);
+            if(final_number <= file_buffer->num_lines) {
+                size_t computed_y_index = (final_number / screen->dimension_y)*(screen->dimension_y) -1*(final_number / screen->dimension_y > 0);
+                cursor_y = final_number;
+                screen->y_index = computed_y_index;
+                display_file(file_buffer);
+            }
+        } else if(strstr(text,"src")) {
+            print_command_output("Enter keyword to find (max 24 ch): ");
+            char keyword[24];
+            int c;
+            int n_of_chars = 1;
+            while(c = read_key()){
+                if(c == 13 || c == 10 || n_of_chars >= 24) break;
+                keyword[n_of_chars - 1] = c;
+                n_of_chars++;
+                printf("%c",c);
+            }
+            print_command_output("Keyword found at lines: ");
+            Line** lines = (Line**) (file_buffer + 1);
+            for(size_t i = 0; i < file_buffer->num_lines; i++){
+                Line* line = lines[i];
+                if(strstr((char*)(line + 1),keyword)){
+                    printf("%zu, ",i + 1);
+                }
+            }
+        } else if(strstr(text,"cll")) {
+            Line** lines = (Line**) (file_buffer + 1);
+            free(lines[cursor_y - 1]);
+            lines[cursor_y - 1] = init_line("");
+            display_file(file_buffer);
+            print_command_output("Cleared the line");
+        } else if(strstr(text,"swp")) {
+            print_command_output("Enter line to swap with: ");
+            int c;
+            int digit = 1;
+            int final_number = 0;
+            while(c = read_key()){
+                if(c == 13 || c == 10) break;
+                if(c >= '0' && c <= '9') {
+                    int number = c - '0';
+                    if(digit > 1) final_number *= 10;
+                    final_number += number;
+                    digit++;
+                    printf("%c",c);
+                }
+            }
+            if(final_number < 1){
+                print_command_output("Invalid line number");
+                return;
+            }
+            char mess_string[128];
+            snprintf(mess_string,sizeof(mess_string),(final_number <= file_buffer->num_lines) ? "Swapping with line: %zu" : "Line is out of this file",final_number);
+            print_command_output(mess_string);
+            if(final_number <= file_buffer->num_lines) {
+                Line* tmp = get_line_from_buffer(file_buffer,final_number - 1);
+                Line** lines = (Line**) (file_buffer + 1);
+                lines[final_number - 1] = lines[cursor_y - 1];
+                lines[cursor_y - 1] = tmp;
+                display_file(file_buffer);
+            }
+        }else {
+            print_command_output("\x1b[31m Unknown command");
+        }
+    } 
+        
+    command_mode_cursor_x = 1;
+    free(command);
+    command = init_line("");
+}
+
+// VITAL FUNCTIONS
+//saves the file and displays the saved message
+void save_file(FILE* file_out, File* file_in){
+    if(file_in == NULL || file_out == NULL){
+        perror("save file needs two valid pointers");
+        exit(EXIT_FAILURE);
+    }
+    for (size_t i = 0; i < file_in->num_lines; i++) {
+        fputs(line_to_string(get_line_from_buffer(file_in, i)), file_out);
+        if (i < file_in->num_lines) fputc('\n', file_out);
+    }
+    fflush(file_out);
+    fclose(file_out);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+3, 1);
+    printf("\x1b[32mFile saved!\x1b[0m");
+    printf("\x1b[%zu;%zuH",(is_command_mode == 1) ? (command_mode_cursor_y) : (cursor_y - screen->y_index),(is_command_mode == 1) ? command_mode_cursor_x : (cursor_x + padding_x));
+    changes = 0;
+}
+
 int main(int argc, char *argv[]) {
     screen = malloc(sizeof(Screen));
     screen->dimension_x = 80;
     screen->dimension_y = 20;
+    screen->y_index = 0;
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return EXIT_FAILURE;
@@ -339,12 +575,21 @@ int main(int argc, char *argv[]) {
     printf("\x1b[?1049h");
     // display the inital file and move the cursor to the start
     display_file(file_buffer);
-    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
-    printf("Lenght change: %zu", changes);
-    printf("\x1b[1;%zuH",padding_x);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+3, 1);
+    printf("Length change: %d - \x1b[90mUnsaved\x1b[0m", changes);
+    printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+1,1);
+    for(size_t i = 0; i < screen->dimension_x; i++) {
+        printf("-");
+    }
+    //inits the command palette
+    init_command_palette();
+    //move the cursor to the start
+    printf("\x1b[1;%zuH",padding_x + 1);
     //enter a loop
     char c;
+    signed int prev_changes = 0;
     while(c = read_key()){
+        //handles specific ctrl key commands (quit, save, command mode)
         if(c == 17) break;
         if(c == 19) {
             FILE *file = fopen(argv[1], "w+");
@@ -355,38 +600,97 @@ int main(int argc, char *argv[]) {
             save_file(file,file_buffer);
             continue;
         }
-        if (c == 27) {
-            if (getchar() != '[') continue;
-            int k = getchar();
-            if (k == 'D' && cursor_x > 1) cursor_x--;
-            else if (k == 'A' && cursor_y > 1) cursor_y--;
-            else if (k == 'C' && cursor_x) cursor_x++;
-            else if (k == 'B' && cursor_y < file_buffer->num_lines) cursor_y++;
-            changes--;
-        }else if((c == 127 || c == 8)){
-            if(cursor_x > 1){
-                delete_char(file_buffer,cursor_y - 1, cursor_x - 2);
-                re_render_line(cursor_y - 1,file_buffer);
-                cursor_x--;
-                changes--;
-            }
-            changes--;
-        } else if(c == 13 || c == 10) {
-            cursor_y++;
-            cursor_x = 1;
-            file_buffer = add_new_line(file_buffer,cursor_y - 1);
-            display_file(file_buffer);
-        } else if(c >= 32 && c < 127){
-            size_t col = insert_char(file_buffer, cursor_y - 1, cursor_x - 1, c);
-            re_render_line(cursor_y - 1,file_buffer);
-            cursor_x = col + 2;
+        if(c == 16){
+            is_command_mode = (is_command_mode == 1) ? 0 : 1;
+            display_command_palette();
         }
-        changes++;
-        printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+2, 1);
-        printf("Lenght change: %d", changes);
-        printf("\x1b[%zu;%zuH",cursor_y,cursor_x + padding_x - 1);
+        //handles typing mode
+        if(is_command_mode == 0){
+            prev_changes = changes;
+            if (c == 27) {
+                if (getchar() != '[') continue;
+                int k = getchar();
+                if (k == 'D' && cursor_x > 1) cursor_x--;
+                else if (k == 'A' && cursor_y > 1) {
+                    cursor_y--;
+                    if(cursor_y < screen->y_index + 1 && screen->y_index > 0){
+                        screen->y_index--;
+                        display_file(file_buffer);
+                    }
+                }
+                else if (k == 'C' && cursor_x) cursor_x++;
+                else if (k == 'B' && cursor_y < file_buffer->num_lines) {
+                    cursor_y++;
+                    if(cursor_y > screen->dimension_y){
+                        screen->y_index++;
+                        display_file(file_buffer);
+                    }
+                }
+            }else if(c == 127 || c == 8){
+                if (cursor_x > 1) {
+                    delete_char(file_buffer, cursor_y - 1, cursor_x - 2);
+                    re_render_line(cursor_y - 1,file_buffer);
+                    cursor_x--;
+                    changes--;
+                } else if (cursor_x == 1) {
+                    merge_lines(file_buffer, (size_t)(cursor_y - 1));
+                    if(screen->y_index > 0){
+                        screen->y_index--;
+                    }
+                    display_file(file_buffer);
+                    if(cursor_y > 1){
+                        changes--;
+                    }
+                }
+            } else if(c == 13 || c == 10) {
+                file_buffer = add_new_line(file_buffer,cursor_y - 1, cursor_x - 1);
+                cursor_y++;
+                if(cursor_y > screen->dimension_y){
+                    cursor_x = 1;
+                    screen->y_index++;
+                    display_file(file_buffer);
+                } else {
+                    cursor_x = 1;
+                    display_file(file_buffer);
+                }
+            } else if(c >= 32 && c < 127){
+                size_t col = insert_char(file_buffer, cursor_y  - 1, cursor_x - 1, c);
+                re_render_line(cursor_y - 1,file_buffer);
+                cursor_x = col + 2;
+                changes++;
+            }
+            if(prev_changes != changes){
+                printf("\x1b[%zu;%zuH\x1b[K",screen->dimension_y+3, 1);
+                printf("Length change: %d - \x1b[90mUnsaved\x1b[0m", changes);
+            }
+        } else if(is_command_mode == 1){
+            //handles command mode
+            if (c == 27) {
+                if (getchar() != '[') continue;
+                int k = getchar();
+                if (k == 'D' && command_mode_cursor_x > 1) command_mode_cursor_x--;
+                else if (k == 'C' && command_mode_cursor_x < command->length + 1) command_mode_cursor_x++;
+            } else if((c == 127 || c == 8)) {
+                if (command_mode_cursor_x > 1) {
+                    delete_char_command_palette(command_mode_cursor_x - 2);
+                    command_mode_cursor_x--;
+                }
+                display_command_palette();
+            } else if(c == 13 || c == 10) {
+                if(command->length > 0){
+                    evaluate_command(file_buffer);
+                    display_command_palette();
+                }
+            } else if(c >= 32 && c < 127){
+                size_t col = insert_char_command_palette(command_mode_cursor_x - 1, c);
+                command_mode_cursor_x = col + 2;
+                display_command_palette();
+            }
+        }
+        printf("\x1b[%zu;%zuH",(is_command_mode == 1) ? (command_mode_cursor_y) : (cursor_y - screen->y_index),(is_command_mode == 1) ? command_mode_cursor_x : (cursor_x + padding_x));
     }
-    //leave alternate screen
+    //uninitialize the terminal and free memory
     free(file_buffer);
+    free_command_palette();
     return EXIT_SUCCESS;
 }
