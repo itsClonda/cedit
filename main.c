@@ -306,17 +306,18 @@ char *line_to_string(Line *line) {
 }
 
 //rerenders 1 line 
-void re_render_line(size_t index, File* file_buffer){
+void re_render_line(size_t index, File* file_buffer, size_t col) {
     Line* line = get_line_from_buffer(file_buffer,index);
-    printf("\x1b[%zu;%zuH\x1b[K",index + 1 - screen->y_index, padding_x + 1);
-    fputs(line_to_string(line), stdout);
+    printf("\x1b[?25l\x1b[%zu;%zuH\x1b[K",index + 1 - screen->y_index, col + 1 + padding_x);
+    char* line_str = line_to_string(line);
+    fputs(line_str + col, stdout);
     printf("\n");
 }
 
 //prints the file
 void display_file(File* file_buffer){
     // clear screen
-    printf("\x1b[H");
+    printf("\x1b[H\x1b[?25l");
     for(int i = screen->y_index; i < (screen->dimension_y + screen->y_index); i++){
         if(i < file_buffer->num_lines){
             Line* line = get_line_from_buffer(file_buffer,i);
@@ -433,11 +434,11 @@ void evaluate_command(File* file_buffer){
         //prints command
         print_command_name(text);
         //evaluates the commands
-        if(strstr(text,"lns") != NULL){
+        if(strstr(text,"lns") || strstr(text,"lines")){
             char mess_string[128];
             snprintf(mess_string,sizeof(mess_string),"The program has %zu lines.",file_buffer->num_lines);
             print_command_output(mess_string);
-        } else if(strstr(text,"jmp")) {
+        } else if(strstr(text,"jmp") || strstr(text,"jump")) {
             print_command_output("Enter line to jump to: ");
             int c;
             int digit = 1;
@@ -465,16 +466,23 @@ void evaluate_command(File* file_buffer){
                 screen->y_index = computed_y_index;
                 display_file(file_buffer);
             }
-        } else if(strstr(text,"src")) {
-            print_command_output("Enter keyword to find (max 24 ch): ");
+        } else if(strstr(text,"src") || strstr(text,"search")) {
+            print_command_output("Enter keyword to find (max 23 ch): ");
             char keyword[24];
             int c;
-            int n_of_chars = 1;
+            int n_of_chars = 0;
             while(c = read_key()){
-                if(c == 13 || c == 10 || n_of_chars >= 24) break;
-                keyword[n_of_chars - 1] = c;
-                n_of_chars++;
-                printf("%c",c);
+                if(c == 13 || c == 10 || n_of_chars >= 22) break;
+                if(c >= 32 && c <= 126){
+                    keyword[n_of_chars] = c;
+                    n_of_chars++;
+                    printf("%c",c);
+                }
+            }
+            keyword[n_of_chars] = '\0';
+            if(keyword[0] == '\0'){
+                print_command_output("Passed in an empty string");
+                return;
             }
             print_command_output("Keyword found at lines: ");
             Line** lines = (Line**) (file_buffer + 1);
@@ -484,13 +492,15 @@ void evaluate_command(File* file_buffer){
                     printf("%zu, ",i + 1);
                 }
             }
-        } else if(strstr(text,"cll")) {
+        } else if(strstr(text,"cll") || strstr(text,"clearline")) {
             Line** lines = (Line**) (file_buffer + 1);
+            size_t line_length = lines[cursor_y - 1]->length;
+            changes -= line_length;
             free(lines[cursor_y - 1]);
             lines[cursor_y - 1] = init_line("");
             display_file(file_buffer);
             print_command_output("Cleared the line");
-        } else if(strstr(text,"swp")) {
+        } else if(strstr(text,"swp") || strstr(text,"swap")) {
             print_command_output("Enter line to swap with: ");
             int c;
             int digit = 1;
@@ -558,12 +568,12 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    FILE *file = fopen(argv[1], "r");
+    FILE *file = fopen(argv[1], "a+");
     if (file == NULL) {
         perror("Error opening file");
         return EXIT_FAILURE;
     }
-
+    rewind(file);
     File *file_buffer = format_file_to_buffer(file);
     fclose(file);
     //enables raw terminal mode
@@ -629,7 +639,7 @@ int main(int argc, char *argv[]) {
             }else if(c == 127 || c == 8){
                 if (cursor_x > 1) {
                     delete_char(file_buffer, cursor_y - 1, cursor_x - 2);
-                    re_render_line(cursor_y - 1,file_buffer);
+                    re_render_line(cursor_y - 1,file_buffer, cursor_x - 2);
                     cursor_x--;
                     changes--;
                 } else if (cursor_x == 1) {
@@ -655,7 +665,7 @@ int main(int argc, char *argv[]) {
                 }
             } else if(c >= 32 && c < 127){
                 size_t col = insert_char(file_buffer, cursor_y  - 1, cursor_x - 1, c);
-                re_render_line(cursor_y - 1,file_buffer);
+                re_render_line(cursor_y - 1,file_buffer,col);
                 cursor_x = col + 2;
                 changes++;
             }
@@ -687,7 +697,7 @@ int main(int argc, char *argv[]) {
                 display_command_palette();
             }
         }
-        printf("\x1b[%zu;%zuH",(is_command_mode == 1) ? (command_mode_cursor_y) : (cursor_y - screen->y_index),(is_command_mode == 1) ? command_mode_cursor_x : (cursor_x + padding_x));
+        printf("\x1b[%zu;%zuH\x1b[?25h",(is_command_mode == 1) ? (command_mode_cursor_y) : (cursor_y - screen->y_index),(is_command_mode == 1) ? command_mode_cursor_x : (cursor_x + padding_x));
     }
     //uninitialize the terminal and free memory
     free(file_buffer);

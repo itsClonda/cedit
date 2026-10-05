@@ -1,13 +1,13 @@
 #include "stdio.h"
-// this comment needs to go in row 2
+
 
 int main(void) {
     printf("Hello World!\n");
     printf("this fucking works!");
     char c;
     while(c = getchar()) {
-        if(c == q) break;
-        printf(c);
+        if(c == 'q') break;
+         printf("%c-",c);
     }
     return 0;
 }
@@ -19,6 +19,9 @@ int main(void) {
 
 
 
+
+
+// this comment is snake_case
 
 
 
