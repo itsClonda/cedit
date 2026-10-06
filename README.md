@@ -44,3 +44,5 @@ Every command starts with a `$` symbol. This is a choice made to prevent occasio
 ---
 
 For now, this is it. The program only works on Windows, but i would really like if someone modified it to work on Linux the same. 
+
+> To compile, download the source code and run `gcc -o /build/cedit main.c` 
